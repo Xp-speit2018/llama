@@ -160,7 +160,7 @@ cython_debug/
 #.idea/
 
 # all model weights
-llama*
+llama-*
 
 # tokenizer
 tokenizer*
