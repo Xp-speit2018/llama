@@ -92,7 +92,7 @@ class Llama:
 
         # mapping rank to device 6,7
         # local_rank = (local_rank % 2) + 6
-        print(f"local rank: {local_rank}")
+        # print(f"local rank: {local_rank}")
         torch.cuda.set_device(local_rank)
 
         # seed must be the same in all processes
