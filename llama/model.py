@@ -492,4 +492,9 @@ class Transformer(nn.Module):
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)
         output = self.output(h).float()
+
+        print("h.shape", h.shape)
+        print("freqs_cis.shape", freqs_cis.shape)
+        print("tokens.shape", tokens.shape)
+        print("output.shape", output.shape)
         return output

@@ -5,6 +5,9 @@ from tqdm import tqdm
 import argparse
 from time import time
 
+from llama import Tokenizer, Transformer
+from torch.nn import CrossEntropyLoss
+
 class Timer:
     def __init__(self):
         self.start = time()
@@ -52,9 +55,21 @@ def preprocess_dataset(dataset_name, root='./'):
     return dataset
 
 def encode_dataset(dataset, tokenizer):
-    return tokenizer("\n\n".join(dataset['text']), return_tensors='pt')
+    merged_text = "\n\n".join(dataset['text'])
 
-def perplexity(model, tokenizer, dataset, device, *, stride=None, verbose=True, debug=False):
+    if isinstance(tokenizer, Tokenizer):
+        # tokenizer is from llama
+        token_ids = tokenizer.encode(merged_text, bos=True, eos=True)
+        input_ids = torch.tensor([token_ids], dtype=torch.long)
+        attention_mask = torch.ones_like(input_ids)
+        res = {'input_ids': input_ids, 'attention_mask': attention_mask}
+    else:
+        # tokenizer is from torch
+        res = tokenizer(merged_text, return_tensor='pt')
+
+    return res
+
+def perplexity(model, tokenizer, dataset, device, *, stride=None, verbose=True, debug=False, root='./'):
     model.to(device)
     model.eval()
     if stride is None:
@@ -62,28 +77,42 @@ def perplexity(model, tokenizer, dataset, device, *, stride=None, verbose=True, 
 
     if verbose:
         print(f'{t}    Loading dataset {dataset}')
-    dataset_pr = preprocess_dataset(dataset)
+    dataset_pr = preprocess_dataset(dataset, root)
     if verbose:
         print(f'{t}    Encoding dataset')
+
     encodings = encode_dataset(dataset_pr, tokenizer)
-    max_length = model.config.n_positions
-    seq_len = encodings.input_ids.size(1)
+
+    if isinstance(tokenizer, Tokenizer):
+        max_length = tokenizer.n_words
+    else:
+        max_length = model.config.n_positions
+
+    seq_len = encodings['input_ids'].size(1)
     
     nlls = [] # negative log likelihoods
     total_length = 0
     prev_end_loc = 0
+    loss_fn = CrossEntropyLoss()
     for begin_loc in tqdm(range(0, seq_len, stride)):
 
         # do some padding
         end_loc = min(begin_loc + max_length, seq_len)
         trg_len = end_loc - prev_end_loc
-        input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
+        input_ids = encodings['input_ids'][:, begin_loc:end_loc].to(device)
         target_ids = input_ids.clone()
         target_ids[:, :-trg_len] = -100 # -100 will be ignored by loss function
 
+        print("input_ids.shape", input_ids.shape)
+
         with torch.no_grad():
-            outputs = model(input_ids, labels=target_ids)
-            nll = outputs.loss
+            if isinstance(model, Transformer):
+                # model is from llama
+                outputs = model(input_ids, 0)
+                nll = loss_fn(outputs.view(-1, outputs.size(-1)), target_ids.view(-1))
+            else:
+                outputs = model(input_ids, labels=target_ids)
+                nll = outputs.loss
         
         nlls.append(nll * trg_len)
         total_length += trg_len
