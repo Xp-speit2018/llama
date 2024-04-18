@@ -1,4 +1,4 @@
-from transformers import GPT2LMHeadModel, GPT2Tokenizer, AutoTokenizer, AutoModelForCausalLM
+from transformers import GPT2LMHeadModel, GPT2Tokenizer, AutoTokenizer, AutoModelForCausalLM, LlamaTokenizer, LlamaForCausalLM
 import torch
 from datasets import load_from_disk, load_dataset
 from tqdm import tqdm
@@ -65,7 +65,7 @@ def encode_dataset(dataset, tokenizer):
         res = {'input_ids': input_ids, 'attention_mask': attention_mask}
     else:
         # tokenizer is from torch
-        res = tokenizer(merged_text, return_tensor='pt')
+        res = tokenizer(merged_text, return_tensors='pt')
 
     return res
 
@@ -83,10 +83,12 @@ def perplexity(model, tokenizer, dataset, device, *, stride=None, verbose=True, 
 
     encodings = encode_dataset(dataset_pr, tokenizer)
 
-    if isinstance(tokenizer, Tokenizer):
-        max_length = tokenizer.n_words
-    else:
+    if isinstance(model, GPT2LMHeadModel):
         max_length = model.config.n_positions
+    elif isinstance(model, LlamaForCausalLM):
+        max_length = model.config.max_position_embeddings
+    else:
+        raise ValueError('Model not supported')
 
     seq_len = encodings['input_ids'].size(1)
     
@@ -103,14 +105,7 @@ def perplexity(model, tokenizer, dataset, device, *, stride=None, verbose=True, 
         target_ids = input_ids.clone()
         target_ids[:, :-trg_len] = -100 # -100 will be ignored by loss function
 
-        print("input_ids.shape", input_ids.shape)
-
         with torch.no_grad():
-            if isinstance(model, Transformer):
-                # model is from llama
-                outputs = model(input_ids, 0)
-                nll = loss_fn(outputs.view(-1, outputs.size(-1)), target_ids.view(-1))
-            else:
                 outputs = model(input_ids, labels=target_ids)
                 nll = outputs.loss
         
