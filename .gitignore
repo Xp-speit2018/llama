@@ -164,3 +164,5 @@ llama-*
 
 # tokenizer
 tokenizer*
+
+pq_index/*
