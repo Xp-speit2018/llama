@@ -16,10 +16,52 @@ from faiss import IndexPQ, IndexFlatIP
 from faiss import read_index
 
 from pyinstrument import Profiler
+from memory_profiler import memory_usage
 from tqdm import tqdm
 
 profiler = Profiler()
 
+from pynvml.smi import nvidia_smi
+nvsmi = nvidia_smi.getInstance()
+
+GPU_MAX_SELECTION_K = 2048
+
+def gpu_profile(func):
+    def wrapper(*args, **kwargs):
+        # mem_usage_before = memory_usage(-1,interval=0.1, timeout=1)
+        # start = time.time()
+        print("before", nvsmi.DeviceQuery('memory.free, memory.total'))
+        result = func(*args, **kwargs)
+        print("after", nvsmi.DeviceQuery('memory.free, memory.total'))
+        # stop = time.time()
+        # mem_usage_after = memory_usage(-1,interval=0.1, timeout=1)
+        # plt.figure(figsize=(10,5))plt.plot(mem_usage_before,'-b', label='Before')plt.plot(mem_usage_after,
+        # plt.ylabel('Memory usage(MB)')plt.xlabel('Time(s)')plt.legend(loc='best')
+        # plt.show()
+        # print(f'Time elapsed: {stop - start}')
+        # print(f"mem_usage_before: {mem_usage_before}")
+        # print(f"mem_usage_after: {mem_usage_after}")
+        return result
+    return wrapper
+
+def profile(func):
+    def wrapper(*args, **kwargs):
+        mem_usage_before = memory_usage(-1,interval=0.1, timeout=1)
+        # start = time.time()
+        result = func(*args, **kwargs)
+        # stop = time.time()
+        mem_usage_after = memory_usage(-1,interval=0.1, timeout=1)
+        # plt.figure(figsize=(10,5))plt.plot(mem_usage_before,'-b', label='Before')plt.plot(mem_usage_after,
+        # plt.ylabel('Memory usage(MB)')plt.xlabel('Time(s)')plt.legend(loc='best')
+        # plt.show()
+        # print(f'Time elapsed: {stop - start}')
+        print(f"mem_usage_before: {mem_usage_before}")
+        print(f"mem_usage_after: {mem_usage_after}")
+        return result
+    return wrapper
+
+
+# @profile
 def restore_index(layer_idx: int, head_idx: int, toGPU=True):
     """
     Restore a FAISS IndexPQ from disk.
@@ -31,13 +73,17 @@ def restore_index(layer_idx: int, head_idx: int, toGPU=True):
     Returns:
     faiss.IndexPQ: The restored FAISS index.
     """
-    index_filename = f"../pq_index/pq_{layer_idx}_{head_idx}.index"
+    index_filename = f"../pq_index/ivfpq_{layer_idx}_{head_idx}.index" # TODO: use ivfpq with nlist=1 to move to GPU
     idx = read_index(index_filename)
     if toGPU is True:
         # move the index to gpu
         res = faiss.StandardGpuResources()
+        res.noTempMemory() #TODO: install nightly build https://github.com/facebookresearch/faiss/issues/3259
         idx = faiss.index_cpu_to_gpu(res, 0, idx)
         # print(f"pq_{layer_idx}_{head_idx}.index moved to GPU.")
+
+        # copy to ivf index
+        
         
     return idx
 
@@ -45,7 +91,7 @@ class KeyStateTensorMocker:
     def __init__(self, key_states: Union[torch.Tensor, 'KeyStateTensorMocker'], layer_idx: int) -> None:
         self._cache = None
         self._shape = None
-        self._debug_cache = None
+        # self._debug_cache = None
         
         self.layer_idx = layer_idx
         if key_states is not None:
@@ -53,12 +99,12 @@ class KeyStateTensorMocker:
                 # This is used when from_legacy_cache is called
                 self._cache = key_states._cache
                 self._shape = key_states._shape
-                self._debug_cache = key_states._debug_cache
+                # self._debug_cache = key_states._debug_cache
                 return
 
             bsz, num_heads, seq_len, head_dim = key_states.shape
             # self._cache = [IndexFlatIP(head_dim) for _ in range(num_heads)]
-            self._cache = [restore_index(layer_idx, i) for i in range(num_heads)] # pq
+            self._cache = [restore_index(layer_idx, i) for i in range(num_heads)] # TODO: support bsz>1
             self._shape = [bsz, num_heads, 0, head_dim]
 
             self.cat(key_states)          
@@ -82,10 +128,10 @@ class KeyStateTensorMocker:
 
         self._shape[2] += seq_len
 
-        if self._debug_cache is None:
-            self._debug_cache = key_states
-        else:
-            self._debug_cache = torch.cat([self._debug_cache, key_states], dim=-2)
+        # if self._debug_cache is None:
+        #     self._debug_cache = key_states
+        # else:
+        #     self._debug_cache = torch.cat([self._debug_cache, key_states], dim=-2)
  
         pass
     def __getitem__(self, idx: int) -> IndexFlatIP:
@@ -110,7 +156,7 @@ class DatabaseCache(DynamicCache):
     def __init__(self) -> None:
         self.key_cache : List[KeyStateTensorMocker] = [] # indexed by layer_idx
         self.value_cache : List[torch.Tensor] = []
-        self._debug_key_cache : List[torch.Tensor] = []
+        # self._debug_key_cache : List[torch.Tensor] = []
         self._seen_tokens = 0
     
     def reorder_cache(self, beam_idx: torch.LongTensor):
@@ -146,10 +192,15 @@ class DatabaseCache(DynamicCache):
         if seq_len > 0:
             attn_score = torch.zeros(bsz, num_heads, query_len, seq_len, device=query_states.device)
             top_k = int(seq_len * 1)
+            if top_k > GPU_MAX_SELECTION_K:
+                top_k = GPU_MAX_SELECTION_K
             # top_k = seq_len
             for b in range(bsz): # TODO: parallelize this
                 for h in range(num_heads):
-                    D, I = self.key_cache[layer_idx][h].search(query_states[b, h, :, :].cpu().numpy(), top_k) # TODO: specify k
+                    
+                    # search = self.key_cache[layer_idx][h].search
+                    search = profile(self.key_cache[layer_idx][h].search)
+                    D, I = search(query_states[b, h, :, :].cpu().numpy(), top_k) # TODO: specify k
                     # convert D to tensor
                     D = torch.tensor(D, device=query_states.device)
                     I = torch.tensor(I, device=query_states.device)
@@ -157,9 +208,11 @@ class DatabaseCache(DynamicCache):
                     #     for (jdx, col) in enumerate(cols):
                     #         attn_score[b, h, idx, col] = D[idx, jdx]
                     attn_score[b, h, torch.arange(I.size(0)).unsqueeze(1), I] = D
+        
+        print(f"layer {layer_idx} score done")
 
-        else:
-            attn_score = query_states @ self._debug_key_cache[layer_idx].transpose(-1, -2)
+        # else:
+        #     attn_score = query_states @ self._debug_key_cache[layer_idx].transpose(-1, -2)
 
 
         attn_score[torch.abs(attn_score) < 1e-5] = -1e10
@@ -191,14 +244,14 @@ class DatabaseCache(DynamicCache):
             self.value_cache.append(value_states)
 
             if isinstance(key_states, KeyStateTensorMocker):
-                # key_states = key_states.reconstruct()
-                key_states = key_states._debug_cache
-            self._debug_key_cache.append(key_states)
+                key_states = key_states.reconstruct()
+                # key_states = key_states._debug_cache
+            # self._debug_key_cache.append(key_states)
         else:
             # update the cache
             self.key_cache[layer_idx].cat(key_states)
             self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
-            self._debug_key_cache[layer_idx] = torch.cat([self._debug_key_cache[layer_idx], key_states], dim=-2)
+            # self._debug_key_cache[layer_idx] = torch.cat([self._debug_key_cache[layer_idx], key_states], dim=-2)
      
 class LlamaForCausalLMDB(LlamaForCausalLM):
     def __init__(self, config):

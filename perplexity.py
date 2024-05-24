@@ -8,6 +8,8 @@ from time import time
 from llama import Tokenizer, Transformer
 from torch.nn import CrossEntropyLoss
 
+GPU_MAX_SELECTION_K = 2048
+
 class Timer:
     def __init__(self):
         self.start = time()
@@ -89,6 +91,14 @@ def perplexity(model, tokenizer, dataset, device, *, stride=None, verbose=True, 
         max_length = model.config.max_position_embeddings
     else:
         raise ValueError('Model not supported')
+    
+    # if max_length > GPU_MAX_SELECTION_K:
+    #     print(f'{t}Warning: max_length {max_length} is too large for GPU, setting to {GPU_MAX_SELECTION_K}')
+    #     max_length = GPU_MAX_SELECTION_K
+
+    # if stride > max_length:
+    #     print(f'{t}Warning: stride {stride} is larger than max_length {max_length}, setting to max_length')
+    #     stride = max_length
 
     seq_len = encodings['input_ids'].size(1)
     

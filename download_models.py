@@ -48,12 +48,12 @@ def download_llama3B(dir):
 
 if __name__ == '__main__':
 
-    set_proxy()
+    # set_proxy()
     # download_GPT2XL('./gpt2-xl')
-    download_GPT2Large('./gpt2-large')
+    # download_GPT2Large('./gpt2-large')
     # download_BLOOM('./bloom-7b1')
     # download_wikitext103()
-    # download_PTB()
+    download_PTB()
     # download_wikitext2()
     # download_llama3B('./llama-3B')
-    unset_proxy()
+    # unset_proxy()

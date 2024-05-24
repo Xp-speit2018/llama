@@ -166,3 +166,6 @@ llama-*
 tokenizer*
 
 pq_index/*
+
+PTB
+states/*
