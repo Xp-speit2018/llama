@@ -122,6 +122,8 @@ def perplexity(model, tokenizer, dataset, device, *, stride=None, verbose=True, 
         nlls.append(nll * trg_len)
         total_length += trg_len
 
+        print(f"current ppl: {torch.exp(torch.stack(nlls).sum() / total_length)}")
+        
         prev_end_loc = end_loc
         if end_loc == seq_len:
             break

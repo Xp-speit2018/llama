@@ -12,13 +12,13 @@ from perplexity import perplexity
 def ppl():
     model_path = "../llama-2-7b-hf"
 
-    modelDB = LlamaForCausalLMDB.from_pretrained(model_path)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     device = 'cuda:0'
     root = '../'
     dataset = 'PTB'
 
+    modelDB = LlamaForCausalLMDB.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     stride = modelDB.config.max_position_embeddings # 4096
     ppl_db = perplexity(modelDB, tokenizer, dataset, device, verbose=True, stride=stride, root=root)
     print(ppl_db)

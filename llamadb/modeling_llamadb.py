@@ -19,7 +19,7 @@ from pyinstrument import Profiler
 from memory_profiler import memory_usage
 from tqdm import tqdm
 
-profiler = Profiler()
+# profiler = Profiler()
 
 from pynvml.smi import nvidia_smi
 nvsmi = nvidia_smi.getInstance()
@@ -62,7 +62,7 @@ def profile(func):
 
 
 # @profile
-def restore_index(layer_idx: int, head_idx: int, toGPU=True):
+def restore_index(layer_idx: int, head_idx: int, toGPU=False):
     """
     Restore a FAISS IndexPQ from disk.
     
@@ -73,7 +73,8 @@ def restore_index(layer_idx: int, head_idx: int, toGPU=True):
     Returns:
     faiss.IndexPQ: The restored FAISS index.
     """
-    index_filename = f"../pq_index/ivfpq_{layer_idx}_{head_idx}.index" # TODO: use ivfpq with nlist=1 to move to GPU
+    index_filename = f"../llama_pqindex/PTB/key_{layer_idx}_{head_idx}.ivf" # TODO: use ivfpq with nlist=1 to move to GPU
+    # index_filename = f"../pq_index/pq_{layer_idx}_{head_idx}.index"
     idx = read_index(index_filename)
     if toGPU is True:
         # move the index to gpu
@@ -134,6 +135,7 @@ class KeyStateTensorMocker:
         #     self._debug_cache = torch.cat([self._debug_cache, key_states], dim=-2)
  
         pass
+    
     def __getitem__(self, idx: int) -> IndexFlatIP:
         # print("idx", idx)
         return self._cache[idx]
@@ -192,14 +194,16 @@ class DatabaseCache(DynamicCache):
         if seq_len > 0:
             attn_score = torch.zeros(bsz, num_heads, query_len, seq_len, device=query_states.device)
             top_k = int(seq_len * 1)
-            if top_k > GPU_MAX_SELECTION_K:
-                top_k = GPU_MAX_SELECTION_K
+            # if top_k > GPU_MAX_SELECTION_K:
+            #     # red warning
+            #     print(f"\033[91mWarning: top_k is {top_k}, which is larger than GPU_MAX_SELECTION_K {GPU_MAX_SELECTION_K}.\033[0m")
+            #     top_k = GPU_MAX_SELECTION_K
             # top_k = seq_len
             for b in range(bsz): # TODO: parallelize this
                 for h in range(num_heads):
                     
-                    # search = self.key_cache[layer_idx][h].search
-                    search = profile(self.key_cache[layer_idx][h].search)
+                    search = self.key_cache[layer_idx][h].search
+                    # search = profile(self.key_cache[layer_idx][h].search)
                     D, I = search(query_states[b, h, :, :].cpu().numpy(), top_k) # TODO: specify k
                     # convert D to tensor
                     D = torch.tensor(D, device=query_states.device)
@@ -209,7 +213,7 @@ class DatabaseCache(DynamicCache):
                     #         attn_score[b, h, idx, col] = D[idx, jdx]
                     attn_score[b, h, torch.arange(I.size(0)).unsqueeze(1), I] = D
         
-        print(f"layer {layer_idx} score done")
+        # print(f"layer {layer_idx} score done")
 
         # else:
         #     attn_score = query_states @ self._debug_key_cache[layer_idx].transpose(-1, -2)
