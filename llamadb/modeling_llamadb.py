@@ -1,6 +1,6 @@
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers import LlamaForCausalLM, LlamaTokenizer
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv, LlamaDecoderLayer, LlamaMLP, LlamaRMSNorm, LlamaModel, LlamaSdpaAttention, LlamaPreTrainedModel
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, rotate_half, repeat_kv, LlamaDecoderLayer, LlamaMLP, LlamaRMSNorm, LlamaModel, LlamaSdpaAttention, LlamaPreTrainedModel
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from torch.nn import CrossEntropyLoss
@@ -60,6 +60,29 @@ def profile(func):
         return result
     return wrapper
 
+def apply_rotary_pos_emb_single(k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding to the query and key tensors.
+
+    Args:
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        position_ids (`torch.Tensor`, *optional*):
+            Deprecated and unused.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `torch.Tensor` comprising of the key tensors rotated using the Rotary Position Embedding.
+    """
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return k_embed
 
 # @profile
 def restore_index(layer_idx: int, head_idx: int, toGPU=False):
@@ -104,8 +127,8 @@ class KeyStateTensorMocker:
                 return
 
             bsz, num_heads, seq_len, head_dim = key_states.shape
-            # self._cache = [IndexFlatIP(head_dim) for _ in range(num_heads)]
-            self._cache = [restore_index(layer_idx, i) for i in range(num_heads)] # TODO: support bsz>1
+            self._cache = [IndexFlatIP(head_dim) for _ in range(num_heads)]
+            # self._cache = [restore_index(layer_idx, i) for i in range(num_heads)] # TODO: support bsz>1
             self._shape = [bsz, num_heads, 0, head_dim]
 
             self.cat(key_states)          
@@ -164,7 +187,7 @@ class DatabaseCache(DynamicCache):
     def reorder_cache(self, beam_idx: torch.LongTensor):
         raise NotImplementedError("Reordering the cache is not currently supported")
 
-    def query(self, query_states, layer_idx, *, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None) -> torch.Tensor:
+    def query(self, query_states, layer_idx, *, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, transition_matrix=None, cos=None, sin=None) -> torch.Tensor:
         '''
         Basically implements SDPA with cache
         '''
@@ -208,9 +231,7 @@ class DatabaseCache(DynamicCache):
                     # convert D to tensor
                     D = torch.tensor(D, device=query_states.device)
                     I = torch.tensor(I, device=query_states.device)
-                    # for (idx, cols) in tqdm(enumerate(I)):
-                    #     for (jdx, col) in enumerate(cols):
-                    #         attn_score[b, h, idx, col] = D[idx, jdx]
+                    
                     attn_score[b, h, torch.arange(I.size(0)).unsqueeze(1), I] = D
         
         # print(f"layer {layer_idx} score done")
@@ -228,9 +249,20 @@ class DatabaseCache(DynamicCache):
 
         # dropout
         attn_score = torch.dropout(attn_score, dropout_p, train=True)
-
+        
+        
+        # restore v from k
+        key_rot = self.key_cache[layer_idx].reconstruct()
+        key_rerot = apply_rotary_pos_emb_single(key_rot, cos, -sin)
+        del key_rot
+        key_rerot_full_head = key_rerot.transpose(1, 2).contiguous().view(bsz, self._seen_tokens, num_heads*head_dim)
+        del key_rerot # contiguous will copy the tensor, so we can delete the original tensor
+        value_restored =(key_rerot_full_head @ transition_matrix).view(bsz, self._seen_tokens, num_heads, head_dim).transpose(1, 2)
+        del key_rerot_full_head
+        
         # weighted sum
-        return attn_score @ self.value_cache[layer_idx]
+        # return attn_score @ self.value_cache[layer_idx]
+        return attn_score @ value_restored
 
     def update(self, key_states, value_states, layer_idx, cache_kwargs=None) -> None:
         '''
@@ -516,6 +548,7 @@ class LlamaSdpaAttentionDB(LlamaSdpaAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.middleware = {}
+        self.transition_matrix = None
 
     # Adapted from LlamaAttention.forward
     def forward(
@@ -560,13 +593,22 @@ class LlamaSdpaAttentionDB(LlamaSdpaAttention):
         causal_mask = attention_mask
         if attention_mask is not None:
             causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
-            
+        
+        if self.transition_matrix is None:
+            Wk_double = self.k_proj.weight.T.to(torch.double)
+            Wv_double = self.v_proj.weight.T.to(torch.double)
+            self.transition_matrix = (torch.inverse(Wk_double) @ Wv_double).to(torch.float)
+            del Wk_double, Wv_double
+        
         attn_output = past_key_value.query(
             query_states, 
             self.layer_idx,
             attn_mask=causal_mask,
             dropout_p=self.attention_dropout if self.training else 0.0,
             is_causal=causal_mask is None and q_len > 1,
+            transition_matrix=self.transition_matrix,
+            cos=cos,
+            sin=sin,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
@@ -577,12 +619,12 @@ class LlamaSdpaAttentionDB(LlamaSdpaAttention):
         # profiler.stop()
         # profiler.print()
 
-        self.middleware.update({
-            "query_states" : query_states,
-            "key_states" : key_states,
-            "value_states" : value_states,
-            "past_key_value" : past_key_value
-        })
+        # self.middleware.update({
+        #     "query_states" : query_states,
+        #     "key_states" : key_states,
+        #     "value_states" : value_states,
+        #     "past_key_value" : past_key_value
+        # })
 
         return attn_output, None, past_key_value
     

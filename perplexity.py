@@ -5,7 +5,7 @@ from tqdm import tqdm
 import argparse
 from time import time
 
-from llama import Tokenizer, Transformer
+# from llama import Tokenizer, Transformer
 from torch.nn import CrossEntropyLoss
 
 GPU_MAX_SELECTION_K = 2048
@@ -59,15 +59,18 @@ def preprocess_dataset(dataset_name, root='./'):
 def encode_dataset(dataset, tokenizer):
     merged_text = "\n\n".join(dataset['text'])
 
-    if isinstance(tokenizer, Tokenizer):
-        # tokenizer is from llama
-        token_ids = tokenizer.encode(merged_text, bos=True, eos=True)
-        input_ids = torch.tensor([token_ids], dtype=torch.long)
-        attention_mask = torch.ones_like(input_ids)
-        res = {'input_ids': input_ids, 'attention_mask': attention_mask}
-    else:
-        # tokenizer is from torch
-        res = tokenizer(merged_text, return_tensors='pt')
+    # if isinstance(tokenizer, Tokenizer):
+    #     # tokenizer is from llama
+    #     token_ids = tokenizer.encode(merged_text, bos=True, eos=True)
+    #     input_ids = torch.tensor([token_ids], dtype=torch.long)
+    #     attention_mask = torch.ones_like(input_ids)
+    #     res = {'input_ids': input_ids, 'attention_mask': attention_mask}
+    # else:
+    #     # tokenizer is from torch
+    #     res = tokenizer(merged_text, return_tensors='pt')
+        
+    res = tokenizer(merged_text, return_tensors='pt')
+    
 
     return res
 
