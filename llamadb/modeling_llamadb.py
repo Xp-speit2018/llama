@@ -127,8 +127,8 @@ class KeyStateTensorMocker:
                 return
 
             bsz, num_heads, seq_len, head_dim = key_states.shape
-            self._cache = [IndexFlatIP(head_dim) for _ in range(num_heads)]
-            # self._cache = [restore_index(layer_idx, i) for i in range(num_heads)] # TODO: support bsz>1
+            # self._cache = [IndexFlatIP(head_dim) for _ in range(num_heads)]
+            self._cache = [restore_index(layer_idx, i) for i in range(num_heads)] # TODO: support bsz>1
             self._shape = [bsz, num_heads, 0, head_dim]
 
             self.cat(key_states)          
@@ -163,17 +163,22 @@ class KeyStateTensorMocker:
         # print("idx", idx)
         return self._cache[idx]
 
-    def reconstruct(self) -> torch.Tensor:
+    def reconstruct(self, start=0, end=None) -> torch.Tensor:
         '''
         Reconstruct the mocker to a torch.Tensor
         Inefficient, only for debugging
         '''
         bsz, num_heads, seq_len, head_dim = self._shape
-        key_states = torch.zeros(bsz, num_heads, seq_len, head_dim, device='cuda:0')
+
+        if end is None:
+            end = seq_len
+            
+        key_states = torch.zeros(bsz, num_heads, end-start, head_dim, device='cuda:0')
+
 
         for b in range(bsz):
             for i in range(num_heads):
-                key_states[b, i, :, :] = torch.tensor(self._cache[i].reconstruct_n(0, seq_len), device=key_states.device)
+                key_states[b, i, :, :] = torch.tensor(self._cache[i].reconstruct_n(start, end), device=key_states.device)
         
         return key_states
 
@@ -250,19 +255,34 @@ class DatabaseCache(DynamicCache):
         # dropout
         attn_score = torch.dropout(attn_score, dropout_p, train=True)
         
-        
+
         # restore v from k
-        key_rot = self.key_cache[layer_idx].reconstruct()
-        key_rerot = apply_rotary_pos_emb_single(key_rot, cos, -sin)
+        restore_start = 0
+        restore_end   = query_len
+
+        key_rot = self.key_cache[layer_idx].reconstruct(restore_start, restore_end)
+        key_rerot = apply_rotary_pos_emb_single(key_rot, cos[:, restore_start:restore_end, :], -sin[:, restore_start:restore_end, :])
         del key_rot
-        key_rerot_full_head = key_rerot.transpose(1, 2).contiguous().view(bsz, self._seen_tokens, num_heads*head_dim)
+        key_rerot_full_head = key_rerot.transpose(1, 2).contiguous().view(bsz, restore_end, num_heads*head_dim)
         del key_rerot # contiguous will copy the tensor, so we can delete the original tensor
-        value_restored =(key_rerot_full_head @ transition_matrix).view(bsz, self._seen_tokens, num_heads, head_dim).transpose(1, 2)
+        value_restored =(key_rerot_full_head @ transition_matrix).view(bsz, restore_end, num_heads, head_dim).transpose(1, 2)
         del key_rerot_full_head
+        value = self.value_cache[layer_idx]
         
+        # sliding window
+        sliding_slice = query_len // 2
+        output = torch.zeros_like(query_states)
+
+        output[:, :, :sliding_slice, :] = attn_score[:, :, :sliding_slice, :] @ value
+        for i in range(sliding_slice, query_len):
+            value[:, :, i-sliding_slice, :] = value_restored[:, :, i-sliding_slice, :]
+            output[:, :, i:i+1, :] = attn_score[:, :, i:i+1, :] @ value
+
+        # value = torch.cat([value_restored, self.value_cache[layer_idx][:, :, restore_end:, :]], dim=-2)
         # weighted sum
         # return attn_score @ self.value_cache[layer_idx]
-        return attn_score @ value_restored
+        # return attn_score @ value_restored
+        return output
 
     def update(self, key_states, value_states, layer_idx, cache_kwargs=None) -> None:
         '''
@@ -594,6 +614,7 @@ class LlamaSdpaAttentionDB(LlamaSdpaAttention):
         if attention_mask is not None:
             causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
         
+        # Lazy init transition_matrix
         if self.transition_matrix is None:
             Wk_double = self.k_proj.weight.T.to(torch.double)
             Wv_double = self.v_proj.weight.T.to(torch.double)

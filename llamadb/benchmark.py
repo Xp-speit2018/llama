@@ -9,13 +9,12 @@ from perplexity import perplexity
 
 
 
-def ppl():
+def ppl(dataset='PTB'):
     model_path = "../llama-2-7b-hf"
 
 
     device = 'cuda:0'
     root = '../'
-    dataset = 'PTB'
 
     modelDB = LlamaForCausalLMDB.from_pretrained(model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -32,4 +31,6 @@ def ppl():
     del model
 
 if __name__ == "__main__":
-    ppl()
+    ppl('PTB')
+    # ppl('wikitext')
+    # ppl('wikitext-103-v1')

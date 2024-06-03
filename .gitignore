@@ -166,6 +166,9 @@ llama-*
 tokenizer*
 
 pq_index/*
+llama_pqindex
+wikitext-103-v1
+wikitext-2-raw-v1
 
 PTB
 states/*
