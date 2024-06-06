@@ -96,7 +96,8 @@ def restore_index(layer_idx: int, head_idx: int, toGPU=False):
     Returns:
     faiss.IndexPQ: The restored FAISS index.
     """
-    index_filename = f"../llama_pqindex/PTB/key_{layer_idx}_{head_idx}.ivf" # TODO: use ivfpq with nlist=1 to move to GPU
+    index_filename = f"../llama_pqindex/PTB/key_{layer_idx}_{head_idx}.pq" # TODO: use ivfpq with nlist=1 to move to GPU
+    # index_filename = f"../llama_pqindex/PTB/key_{layer_idx}_{head_idx}.ivf" # TODO: use ivfpq with nlist=1 to move to GPU
     # index_filename = f"../pq_index/pq_{layer_idx}_{head_idx}.index"
     idx = read_index(index_filename)
     if toGPU is True:
@@ -127,8 +128,8 @@ class KeyStateTensorMocker:
                 return
 
             bsz, num_heads, seq_len, head_dim = key_states.shape
-            # self._cache = [IndexFlatIP(head_dim) for _ in range(num_heads)]
-            self._cache = [restore_index(layer_idx, i) for i in range(num_heads)] # TODO: support bsz>1
+            self._cache = [IndexFlatIP(head_dim) for _ in range(num_heads)]
+            # self._cache = [restore_index(layer_idx, i) for i in range(num_heads)] # TODO: support bsz>1
             self._shape = [bsz, num_heads, 0, head_dim]
 
             self.cat(key_states)          
@@ -192,7 +193,7 @@ class DatabaseCache(DynamicCache):
     def reorder_cache(self, beam_idx: torch.LongTensor):
         raise NotImplementedError("Reordering the cache is not currently supported")
 
-    def query(self, query_states, layer_idx, *, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, transition_matrix=None, cos=None, sin=None) -> torch.Tensor:
+    def query(self, query_states, layer_idx, *, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, transition_matrix=None, cos=None, sin=None, key_states=None) -> torch.Tensor:
         '''
         Basically implements SDPA with cache
         '''
@@ -262,9 +263,9 @@ class DatabaseCache(DynamicCache):
 
         key_rot = self.key_cache[layer_idx].reconstruct(restore_start, restore_end)
         key_rerot = apply_rotary_pos_emb_single(key_rot, cos[:, restore_start:restore_end, :], -sin[:, restore_start:restore_end, :])
-        del key_rot
+        # del key_rot
         key_rerot_full_head = key_rerot.transpose(1, 2).contiguous().view(bsz, restore_end, num_heads*head_dim)
-        del key_rerot # contiguous will copy the tensor, so we can delete the original tensor
+        # del key_rerot # contiguous will copy the tensor, so we can delete the original tensor
         value_restored =(key_rerot_full_head @ transition_matrix).view(bsz, restore_end, num_heads, head_dim).transpose(1, 2)
         del key_rerot_full_head
         value = self.value_cache[layer_idx]
@@ -595,6 +596,7 @@ class LlamaSdpaAttentionDB(LlamaSdpaAttention):
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
+        # hidden_states @ Wq.T
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
@@ -630,6 +632,7 @@ class LlamaSdpaAttentionDB(LlamaSdpaAttention):
             transition_matrix=self.transition_matrix,
             cos=cos,
             sin=sin,
+            key_states=key_states,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()

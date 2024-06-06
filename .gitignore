@@ -173,3 +173,6 @@ wikitext-2-raw-v1
 PTB
 states/*
 .vscode
+
+*.pt
+*.png

@@ -74,12 +74,18 @@ if __name__ == "__main__":
     iter_comb = list(itertools.product(range(config.num_hidden_layers), range(config.num_attention_heads)))
 
     for i, j in tqdm.tqdm(iter_comb):
-        index = index_factory(dim, f'PQ{M}x{nbits}', METRIC_INNER_PRODUCT)
+
+        # index = index_factory(dim, f'PQ{M}x{nbits}', METRIC_INNER_PRODUCT)
+        # index.train(
+        #     read_fvecs(f'../llama_key/PTB/key_{i}_{j}.fvecs')
+        # )
+        # ivf = index_factory(dim, f"IVF1,PQ{M}x{nbits}", METRIC_INNER_PRODUCT)
+        # ivf.quantizer.add(np.zeros((1, dim)))
+        # ivf.pq = index.pq
+        # ivf.is_trained = True
+        # write_index(ivf, f'../llama_pqindex/PTB/key_{i}_{j}.ivf')
+        index = IndexPQ(dim, M, nbits, METRIC_INNER_PRODUCT)
         index.train(
             read_fvecs(f'../llama_key/PTB/key_{i}_{j}.fvecs')
         )
-        ivf = index_factory(dim, f"IVF1,PQ{M}x{nbits}", METRIC_INNER_PRODUCT)
-        ivf.quantizer.add(np.zeros((1, dim)))
-        ivf.pq = index.pq
-        ivf.is_trained = True
-        write_index(ivf, f'../llama_pqindex/PTB/key_{i}_{j}.ivf')
+        write_index(index, f'../llama_pqindex/PTB/key_{i}_{j}.pq')
